@@ -7,7 +7,7 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 
-# --- KONFIGURATION & GYM-RUNDUNG ---
+# --- KONFIGURATION ---
 HEVY_BASE_URL = "https://api.hevyapp.com/v1"
 TARGET_WORKOUT_TITLE = "Starting Strength"
 
@@ -20,10 +20,10 @@ RAW_1RM_TARGETS = {
     "Squat": [89, 118, 153, 192, 234],
     "Bench Press": [67, 89, 116, 147, 180],
     "Deadlift": [105, 138, 176, 220, 266],
-    "Overhead Press": [41, 57, 76, 97, 121]  # Shoulder Press
+    "Overhead Press": [41, 57, 76, 97, 121]
 }
 
-# Umrechnung auf 5RM-Arbeitsgewichte (1RM * 0.89) mit Gym-Rundung
+# Umrechnung auf 5RM-Arbeitsgewichte (1RM * 0.89)
 EXERCISE_TARGETS_5RM = {
     ex: [gym_round(val * 0.89) for val in targets]
     for ex, targets in RAW_1RM_TARGETS.items()
@@ -43,14 +43,7 @@ EXERCISE_ALIASES = {
     "Overhead Press": ["overhead press", "shoulder press", "press", "schulterdrücken"],
 }
 
-LEVEL_LABELS = {
-    0: "Below Beginner",
-    1: "Beginner",
-    2: "Novice",
-    3: "Intermediate",
-    4: "Advanced",
-    5: "Elite",
-}
+LEVEL_LABELS = {0: "Below Beginner", 1: "Beginner", 2: "Novice", 3: "Intermediate", 4: "Advanced", 5: "Elite"}
 
 LEVEL_DESCRIPTIONS = {
     "Beginner": "Technik-Phase: Stärker als 5% der Trainierenden. Die Basis sitzt.",
@@ -76,36 +69,28 @@ class HevyClient:
                 params={"page": page, "pageSize": page_size},
                 timeout=30,
             )
-            if response.status_code == 404:
-                return []
+            if response.status_code == 404: return []
             response.raise_for_status()
             payload = response.json()
             return payload if isinstance(payload, list) else payload.get("workouts", [])
-        except:
-            return []
+        except: return []
 
 # --- LOGIK-FUNKTIONEN ---
-
 def normalize_name(name: str) -> str:
     return " ".join((name or "").strip().lower().split())
 
 def canonical_exercise_name(raw_name: str) -> Optional[str]:
     normalized = normalize_name(raw_name)
     for canonical, aliases in EXERCISE_ALIASES.items():
-        if any(alias in normalized for alias in aliases):
-            return canonical
+        if any(alias in normalized for alias in aliases): return canonical
     return None
 
 def level_for_weight(exercise: str, weight: float) -> Tuple[int, float, Optional[float]]:
     targets = EXERCISE_TARGETS_5RM[exercise]
     level = 0
     for idx, target in enumerate(targets, start=1):
-        if weight >= target:
-            level = idx
-
-    if level >= len(targets):
-        return 5, 1.0, None
-
+        if weight >= target: level = idx
+    if level >= len(targets): return 5, 1.0, None
     next_target = targets[level]
     previous_target = 0 if level == 0 else targets[level - 1]
     span = next_target - previous_target
@@ -127,13 +112,36 @@ def process_workouts(workouts: List[Dict[str, Any]]) -> pd.DataFrame:
                         rows.append({"Datum": date, "Übung": name, "Gewicht": weight, "Erfolg": success})
     return pd.DataFrame(rows).sort_values("Datum")
 
+# --- PASSWORT FUNKTION ---
+def check_password():
+    if "password_correct" not in st.session_state:
+        st.title("🔐 Gym Tracker Login")
+        pw = st.text_input("Passwort", type="password")
+        if pw:
+            # Holt das Passwort aus den Secrets
+            if pw == st.secrets.get("APP_PASSWORD", "admin"):
+                st.session_state["password_correct"] = True
+                st.rerun()
+            else:
+                st.error("Falsches Passwort.")
+        return False
+    return True
+
 def main() -> None:
     st.set_page_config(page_title="SS Dashboard (95kg)", page_icon="💪", layout="wide")
-    st.title("💪 Starting Strength Tracker (95kg Male)")
 
-    api_key = os.getenv("HEVY_API_KEY")
+    if not check_password():
+        st.stop()
+
+    # Logout Button in Sidebar
+    if st.sidebar.button("Abmelden"):
+        del st.session_state["password_correct"]
+        st.rerun()
+
+    # Hevy API Key aus Secrets
+    api_key = st.secrets.get("HEVY_API_KEY")
     if not api_key:
-        st.error("Missing HEVY_API_KEY. Bitte in Umgebungsvariablen setzen.")
+        st.error("Fehler: HEVY_API_KEY nicht in Secrets gefunden.")
         st.stop()
 
     client = HevyClient(api_key)
@@ -151,20 +159,18 @@ def main() -> None:
 
     df = process_workouts(all_workouts)
     
-    # 1. Metriken & Nächste Session
+    st.title("💪 Starting Strength Tracker (95kg Male)")
+    
+    # 1. Metriken
     st.subheader("🎯 Nächste Session & Aktuelles Level")
     cols = st.columns(4)
-    
     for i, exercise in enumerate(INCREMENTS.keys()):
         ex_df = df[df["Übung"] == exercise]
         if not ex_df.empty:
             last_entry = ex_df.iloc[-1]
-            last_w = last_entry["Gewicht"]
-            succ = last_entry["Erfolg"]
-            
+            last_w, succ = last_entry["Gewicht"], last_entry["Erfolg"]
             next_w = last_w + INCREMENTS[exercise] if succ else last_w
             lvl, prog, next_t = level_for_weight(exercise, last_w)
-            
             with cols[i]:
                 st.metric(label=exercise, value=f"{next_w} kg", delta=f"{INCREMENTS[exercise] if succ else 0} kg")
                 st.write(f"Level: **{LEVEL_LABELS[lvl]}**")
@@ -174,7 +180,7 @@ def main() -> None:
 
     st.divider()
 
-    # 2. Die visuelle Level-Leiter
+    # 2. Benchmark Tabelle
     st.subheader("🏆 StrengthLevel.com Benchmarks (Gym-Ready 5RM)")
     targets_display = pd.DataFrame(EXERCISE_TARGETS_5RM).T
     targets_display.columns = ["Beginner", "Novice", "Intermediate", "Advanced", "Elite"]
@@ -196,18 +202,16 @@ def main() -> None:
 
     st.divider()
 
-    # 3. Graph
+    # 3. Fortschrittsgraph
     st.subheader("📊 Fortschrittsgraph")
     df["Status"] = df["Erfolg"].map({True: "Erfolgreich (5/5/5)", False: "Stagnation (Fail)"})
-    
     fig = px.line(df, x="Datum", y="Gewicht", color="Übung", markers=True, 
                   line_shape="hv", symbol="Status",
                   color_discrete_sequence=px.colors.qualitative.Pastel)
-    
     fig.update_layout(hovermode="x unified", legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
     st.plotly_chart(fig, use_container_width=True)
 
-    # 4. Rohdaten
+    # 4. Rohdaten Historie
     with st.expander("Ganze Historie einsehen"):
         st.dataframe(df.sort_values("Datum", ascending=False), use_container_width=True)
 
